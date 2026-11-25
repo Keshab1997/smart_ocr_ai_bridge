@@ -3,7 +3,7 @@
 /// A drop-in Flutter package combining 5-script on-device ML Kit OCR with
 /// `admin_api_key_manager` key-pool rotation to reduce LLM vision token usage
 /// by ~85–95%.
-library smart_ocr_ai_bridge;
+library;
 
 export 'src/models/bridge_key.dart';
 export 'src/models/ocr_routing_mode.dart';

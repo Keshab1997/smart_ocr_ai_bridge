@@ -110,7 +110,10 @@ String formatStructuredBlocks(List<String> blocks, {int maxChars = 12000}) {
   if (nonEmpty.isEmpty) return '';
   final buffer = StringBuffer();
   for (var i = 0; i < nonEmpty.length; i++) {
-    if (i > 0) buffer.writeln();
+    if (i > 0) {
+      buffer.writeln();
+      buffer.writeln();
+    }
     buffer.writeln('[Block ${i + 1}]');
     buffer.write(nonEmpty[i]);
   }
