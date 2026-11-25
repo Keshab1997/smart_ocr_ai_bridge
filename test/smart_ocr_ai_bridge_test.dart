@@ -242,5 +242,90 @@ void main() {
         equals('Handwritten note decoded via vision fallback'),
       );
     });
+
+    test(
+        '0-token cache serves repeat scan in 0 API calls and analyzeImageAsJson parses fenced JSON',
+        () async {
+      int httpCallCount = 0;
+      final fakeManager = _FakeApiKeyManager(<_FakeApiKey>[
+        const _FakeApiKey(
+          id: 'key-json-1',
+          name: 'OpenRouter JSON',
+          key: 'sk-json-1',
+          baseUrl: 'https://openrouter.ai/api/v1',
+          model: 'openai/gpt-4o-mini',
+          provider: 'openrouter',
+        ),
+      ]);
+
+      final extractor = MultilingualOcrExtractor(
+        tempDirOverride: tempDir,
+        scriptRunner: (script, _) async {
+          if (script.name == 'latin') {
+            return const ScriptOcrPass(
+              text:
+                  'Store: Apollo Pharmacy\nDate: 26/11/2026\nTotal: ₹850.50\nSupport: help@apollo.in\nCall: +91 9876543210',
+            );
+          }
+          return const ScriptOcrPass(text: '');
+        },
+      );
+
+      final mockHttp = MockClient((http.Request request) async {
+        httpCallCount++;
+        return http.Response(
+          jsonEncode(<String, dynamic>{
+            'choices': <Map<String, dynamic>>[
+              <String, dynamic>{
+                'message': <String, dynamic>{
+                  'content':
+                      '```json\n{"merchant":"Apollo Pharmacy","total":850.50}\n```',
+                },
+              },
+            ],
+          }),
+          200,
+        );
+      });
+
+      final bridge = SmartOcrAiBridge(
+        ocrExtractor: extractor,
+        httpClient: mockHttp,
+      )..bindApiKeyManager(fakeManager);
+
+      // First call hits HTTP endpoint and parses markdown-fenced JSON
+      final jsonMap = await bridge.analyzeImageAsJson(
+        imageBytes: Uint8List.fromList(<int>[1, 2, 3]),
+        userPrompt: 'Extract merchant and total.',
+      );
+      expect(jsonMap['merchant'], equals('Apollo Pharmacy'));
+      expect(jsonMap['total'], equals(850.50));
+      expect(httpCallCount, equals(1));
+
+      // Repeat call with identical prompt & OCR text returns from 0-token cache!
+      final cachedResult = await bridge.analyzeImage(
+        imageBytes: Uint8List.fromList(<int>[1, 2, 3]),
+        userPrompt:
+            'Extract merchant and total.\nReturn ONLY a valid JSON object without markdown commentary.',
+        systemPrompt:
+            'You are a strict JSON extraction engine. Respond ONLY with valid JSON.',
+      );
+      expect(cachedResult.fromCache, isTrue);
+      expect(cachedResult.tokenSavings.actualPromptTokens, equals(0));
+      expect(cachedResult.tokenSavings.savingsPercentage, equals(100.0));
+      expect(httpCallCount, equals(1)); // Still 1 HTTP call!
+
+      // Also verify offline SmartEntityExtractor detected email, amount, date, and phone
+      final types = cachedResult.detectedEntities.map((e) => e.type).toSet();
+      expect(
+        types,
+        containsAll(<SmartEntityType>[
+          SmartEntityType.email,
+          SmartEntityType.amount,
+          SmartEntityType.date,
+          SmartEntityType.phone,
+        ]),
+      );
+    });
   });
 }

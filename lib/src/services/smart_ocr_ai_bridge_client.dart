@@ -9,7 +9,9 @@ import '../models/ocr_routing_mode.dart';
 import '../models/smart_ocr_ai_result.dart';
 import 'key_pool_adapter.dart';
 import 'multilingual_ocr_extractor.dart';
+import 'ocr_prompt_cache.dart';
 import 'ocr_text_optimizer.dart';
+import 'smart_entity_extractor.dart';
 
 /// Exception thrown when no healthy API key is available or all retry attempts
 /// across the key pool failed.
@@ -30,16 +32,18 @@ class SmartOcrAiBridgeException implements Exception {
 }
 
 /// Main drop-in bridge combining 5-script on-device ML Kit OCR with
-/// `admin_api_key_manager` key-pool rotation to reduce LLM vision token usage
-/// by ~85–95%.
+/// `admin_api_key_manager` key-pool rotation, 0-token LRU response caching,
+/// offline entity extraction, and JSON schema parsing.
 class SmartOcrAiBridge {
   SmartOcrAiBridge({
     KeyPoolAdapter? keyPool,
     MultilingualOcrExtractor? ocrExtractor,
     http.Client? httpClient,
+    OcrPromptCache? cache,
   })  : _keyPool = keyPool,
         _ocrExtractor = ocrExtractor ?? MultilingualOcrExtractor(),
-        _httpClient = httpClient ?? http.Client();
+        _httpClient = httpClient ?? http.Client(),
+        _cache = cache ?? OcrPromptCache();
 
   /// Shared singleton for app-wide usage.
   static final SmartOcrAiBridge instance = SmartOcrAiBridge();
@@ -47,26 +51,34 @@ class SmartOcrAiBridge {
   KeyPoolAdapter? _keyPool;
   MultilingualOcrExtractor _ocrExtractor;
   http.Client _httpClient;
+  OcrPromptCache _cache;
+
+  OcrPromptCache get cache => _cache;
 
   /// Binds `ApiKeyManager.instance` from `package:admin_api_key_manager`.
   void bindApiKeyManager(Object apiKeyManagerInstance) {
     _keyPool = KeyPoolAdapter.fromApiKeyManager(apiKeyManagerInstance);
   }
 
-  /// Binds a custom [KeyPoolAdapter].
+  /// Binds a custom [KeyPoolAdapter], [MultilingualOcrExtractor], [http.Client], or [OcrPromptCache].
   void configure({
     KeyPoolAdapter? keyPool,
     MultilingualOcrExtractor? ocrExtractor,
     http.Client? httpClient,
+    OcrPromptCache? cache,
   }) {
     if (keyPool != null) _keyPool = keyPool;
     if (ocrExtractor != null) _ocrExtractor = ocrExtractor;
     if (httpClient != null) _httpClient = httpClient;
+    if (cache != null) _cache = cache;
   }
 
+  /// Clears the 0-token local response cache.
+  void clearCache() => _cache.clear();
+
   /// Runs 5-script on-device OCR on [imageFile] or [imageBytes], compacts the
-  /// extracted text, routes according to [routingMode], and calls the LLM
-  /// using keys from `admin_api_key_manager` with automatic failover.
+  /// extracted text, routes according to [routingMode], checks the 0-token cache,
+  /// and calls the LLM using keys from `admin_api_key_manager` with auto-failover.
   Future<SmartOcrAiResult> analyzeImage({
     File? imageFile,
     Uint8List? imageBytes,
@@ -79,6 +91,7 @@ class SmartOcrAiBridge {
     int estimatedVisionBaselineTokens = 1550,
     int maxKeyAttempts = 3,
     double temperature = 0.2,
+    bool useCache = true,
     String featureTag = 'smart_ocr_ai_bridge',
     String userId = 'anonymous',
   }) async {
@@ -91,10 +104,13 @@ class SmartOcrAiBridge {
         ? await _ocrExtractor.extractFromBytes(imageBytes)
         : await _ocrExtractor.extractFromFilePath(imageFile!.path);
 
+    final cleanedBest =
+        SmartEntityExtractor.cleanIndicOcrArtifacts(extraction.bestText);
+
     // 2. Decide whether to send text-only or fall back to vision bytes
     final String compactedText = routingMode == OcrRoutingMode.structuredBlocks
         ? formatStructuredBlocks(extraction.blocks, maxChars: maxOcrChars)
-        : compactOcrText(extraction.bestText, maxChars: maxOcrChars);
+        : compactOcrText(cleanedBest, maxChars: maxOcrChars);
 
     final bool shouldUseVisionFallback = switch (routingMode) {
       OcrRoutingMode.textOnly => false,
@@ -124,7 +140,7 @@ class SmartOcrAiBridge {
     return _executeWithKeyFailover(
       systemPrompt: systemPrompt,
       composedUserPrompt: composedUserPrompt,
-      rawExtractedText: extraction.bestText,
+      rawExtractedText: cleanedBest,
       compactedOcrText: compactedText,
       ocrScore: extraction.score,
       routingMode: routingMode,
@@ -133,14 +149,46 @@ class SmartOcrAiBridge {
       estimatedVisionBaselineTokens: estimatedVisionBaselineTokens,
       maxKeyAttempts: maxKeyAttempts,
       temperature: temperature,
+      useCache: useCache,
       featureTag: featureTag,
       userId: userId,
     );
   }
 
+  /// Analyzes an image and parses the AI output directly into a structured
+  /// `Map<String, dynamic>` JSON object (automatically stripping markdown code
+  /// fences if the model includes them).
+  Future<Map<String, dynamic>> analyzeImageAsJson({
+    File? imageFile,
+    Uint8List? imageBytes,
+    required String userPrompt,
+    Map<String, dynamic>? schemaHint,
+    String systemPrompt =
+        'You are a strict JSON extraction engine. Respond ONLY with valid JSON.',
+    OcrRoutingMode routingMode = OcrRoutingMode.hybridAuto,
+    bool useCache = true,
+    String featureTag = 'smart_ocr_json',
+    String userId = 'anonymous',
+  }) async {
+    final schemaBlock = schemaHint != null
+        ? '\nReturn a valid JSON object matching this structure:\n${jsonEncode(schemaHint)}'
+        : '\nReturn ONLY a valid JSON object without markdown commentary.';
+    final result = await analyzeImage(
+      imageFile: imageFile,
+      imageBytes: imageBytes,
+      userPrompt: '$userPrompt$schemaBlock',
+      systemPrompt: systemPrompt,
+      routingMode: routingMode,
+      useCache: useCache,
+      featureTag: featureTag,
+      userId: userId,
+    );
+    return extractJsonObject(result.aiResponse);
+  }
+
   /// Directly sends already-extracted OCR text (e.g. from `SnapText OCR`'s
-  /// editable text box) to the AI pool with automatic key failover and
-  /// token-saving telemetry.
+  /// editable text box) to the AI pool with automatic key failover, 0-token
+  /// cache lookup, and token-saving telemetry.
   Future<SmartOcrAiResult> analyzeExtractedText({
     required String extractedText,
     required String userPrompt,
@@ -150,10 +198,12 @@ class SmartOcrAiBridge {
     int estimatedVisionBaselineTokens = 1550,
     int maxKeyAttempts = 3,
     double temperature = 0.2,
+    bool useCache = true,
     String featureTag = 'smart_ocr_text_only',
     String userId = 'anonymous',
   }) async {
-    final compacted = compactOcrText(extractedText, maxChars: maxOcrChars);
+    final cleaned = SmartEntityExtractor.cleanIndicOcrArtifacts(extractedText);
+    final compacted = compactOcrText(cleaned, maxChars: maxOcrChars);
     if (compacted.isEmpty) {
       throw const SmartOcrAiBridgeException(
         'Extracted text is empty; nothing to send to AI.',
@@ -166,7 +216,7 @@ class SmartOcrAiBridge {
     return _executeWithKeyFailover(
       systemPrompt: systemPrompt,
       composedUserPrompt: composedUserPrompt,
-      rawExtractedText: extractedText,
+      rawExtractedText: cleaned,
       compactedOcrText: compacted,
       ocrScore: score,
       routingMode: OcrRoutingMode.textOnly,
@@ -175,6 +225,7 @@ class SmartOcrAiBridge {
       estimatedVisionBaselineTokens: estimatedVisionBaselineTokens,
       maxKeyAttempts: maxKeyAttempts,
       temperature: temperature,
+      useCache: useCache,
       featureTag: featureTag,
       userId: userId,
     );
@@ -192,9 +243,48 @@ class SmartOcrAiBridge {
     required int estimatedVisionBaselineTokens,
     required int maxKeyAttempts,
     required double temperature,
+    required bool useCache,
     required String featureTag,
     required String userId,
   }) async {
+    final entities = SmartEntityExtractor.extractAll(rawExtractedText);
+    final baselineVisionTotal = estimatedVisionBaselineTokens +
+        estimateTextTokens(
+            '$systemPrompt\n${userPromptOnly(composedUserPrompt)}');
+
+    final String cacheKey = OcrPromptCache.computeKey(
+      systemPrompt: systemPrompt,
+      userPrompt: composedUserPrompt,
+      compactedOcrText: compactedOcrText,
+      routingMode: routingMode.name,
+    );
+
+    if (useCache && !usedVisionFallback && compactedOcrText.isNotEmpty) {
+      final cachedAnswer = _cache.get(cacheKey);
+      if (cachedAnswer != null) {
+        return SmartOcrAiResult(
+          aiResponse: cachedAnswer,
+          extractedText: rawExtractedText,
+          compactedOcrText: compactedOcrText,
+          ocrScore: ocrScore,
+          routingMode: routingMode,
+          usedVisionFallback: false,
+          keyIdUsed: 'cache',
+          providerUsed: 'cache',
+          modelUsed: 'cache',
+          attemptsUsed: 0,
+          fromCache: true,
+          detectedEntities: entities,
+          tokenSavings: TokenSavingsReport(
+            estimatedVisionTokens: baselineVisionTotal,
+            actualPromptTokens: 0,
+            usedVisionFallback: false,
+            fromCache: true,
+          ),
+        );
+      }
+    }
+
     final pool = _keyPool;
     if (pool == null) {
       throw const SmartOcrAiBridgeException(
@@ -236,6 +326,10 @@ class SmartOcrAiBridge {
 
           pool.reportSuccess(key);
 
+          if (useCache && !usedVisionFallback && compactedOcrText.isNotEmpty) {
+            _cache.put(cacheKey, parsedAnswer);
+          }
+
           final promptTokens =
               estimateTextTokens('$systemPrompt\n$composedUserPrompt') +
                   (usedVisionFallback ? estimatedVisionBaselineTokens : 0);
@@ -251,13 +345,13 @@ class SmartOcrAiBridge {
             providerUsed: key.provider,
             modelUsed: key.model,
             attemptsUsed: attempt,
+            fromCache: false,
+            detectedEntities: entities,
             tokenSavings: TokenSavingsReport(
-              estimatedVisionTokens: estimatedVisionBaselineTokens +
-                  estimateTextTokens(
-                    '$systemPrompt\n${userPromptOnly(composedUserPrompt)}',
-                  ),
+              estimatedVisionTokens: baselineVisionTotal,
               actualPromptTokens: promptTokens,
               usedVisionFallback: usedVisionFallback,
+              fromCache: false,
             ),
           );
         }
