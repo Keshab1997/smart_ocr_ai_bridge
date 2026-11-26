@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
@@ -76,11 +75,12 @@ class SmartOcrAiBridge {
   /// Clears the 0-token local response cache.
   void clearCache() => _cache.clear();
 
-  /// Runs 5-script on-device OCR on [imageFile] or [imageBytes], compacts the
-  /// extracted text, routes according to [routingMode], checks the 0-token cache,
-  /// and calls the LLM using keys from `admin_api_key_manager` with auto-failover.
+  /// Runs 5-script on-device OCR on [imageFile] (`dart:io` `File` or file path
+  /// `String`) or [imageBytes], compacts the extracted text, routes according to
+  /// [routingMode], checks the 0-token cache, and calls the LLM using keys from
+  /// `admin_api_key_manager` with auto-failover.
   Future<SmartOcrAiResult> analyzeImage({
-    File? imageFile,
+    Object? imageFile,
     Uint8List? imageBytes,
     required String userPrompt,
     String systemPrompt =
@@ -99,10 +99,16 @@ class SmartOcrAiBridge {
       throw ArgumentError('Either imageFile or imageBytes must be provided.');
     }
 
+    final String? resolvedFilePath = imageFile == null
+        ? null
+        : (imageFile is String
+            ? imageFile
+            : (imageFile as dynamic).path as String);
+
     // 1. Run 5-script on-device ML Kit OCR (0 tokens, offline)
     final OcrExtractionResult extraction = imageBytes != null
         ? await _ocrExtractor.extractFromBytes(imageBytes)
-        : await _ocrExtractor.extractFromFilePath(imageFile!.path);
+        : await _ocrExtractor.extractFromFilePath(resolvedFilePath!);
 
     final cleanedBest =
         SmartEntityExtractor.cleanIndicOcrArtifacts(extraction.bestText);
@@ -129,7 +135,8 @@ class SmartOcrAiBridge {
 
     Uint8List? visionPayloadBytes;
     if (shouldUseVisionFallback) {
-      visionPayloadBytes = imageBytes ?? await imageFile!.readAsBytes();
+      visionPayloadBytes =
+          imageBytes ?? await readPlatformFileBytes(resolvedFilePath!);
     }
 
     // 3. Build token-optimized prompt
@@ -159,7 +166,7 @@ class SmartOcrAiBridge {
   /// `Map<String, dynamic>` JSON object (automatically stripping markdown code
   /// fences if the model includes them).
   Future<Map<String, dynamic>> analyzeImageAsJson({
-    File? imageFile,
+    Object? imageFile,
     Uint8List? imageBytes,
     required String userPrompt,
     Map<String, dynamic>? schemaHint,
@@ -229,6 +236,32 @@ class SmartOcrAiBridge {
       featureTag: featureTag,
       userId: userId,
     );
+  }
+
+  /// Directly sends already-extracted OCR text to the AI pool and parses the
+  /// output into a structured `Map<String, dynamic>` JSON object.
+  Future<Map<String, dynamic>> analyzeExtractedTextAsJson({
+    required String extractedText,
+    required String userPrompt,
+    Map<String, dynamic>? schemaHint,
+    String systemPrompt =
+        'You are a strict JSON extraction engine. Respond ONLY with valid JSON.',
+    bool useCache = true,
+    String featureTag = 'smart_ocr_text_json',
+    String userId = 'anonymous',
+  }) async {
+    final schemaBlock = schemaHint != null
+        ? '\nReturn a valid JSON object matching this structure:\n${jsonEncode(schemaHint)}'
+        : '\nReturn ONLY a valid JSON object without markdown commentary.';
+    final result = await analyzeExtractedText(
+      extractedText: extractedText,
+      userPrompt: '$userPrompt$schemaBlock',
+      systemPrompt: systemPrompt,
+      useCache: useCache,
+      featureTag: featureTag,
+      userId: userId,
+    );
+    return extractJsonObject(result.aiResponse);
   }
 
   Future<SmartOcrAiResult> _executeWithKeyFailover({

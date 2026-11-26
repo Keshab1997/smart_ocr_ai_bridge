@@ -2,7 +2,7 @@ name: smart_ocr_ai_bridge
 description: >-
   Reusable Flutter package combining 5-script on-device ML Kit OCR with
   admin_api_key_manager auto-failover to cut LLM vision token usage by ~90%.
-version: 1.0.0
+version: 1.1.0
 homepage: https://github.com/Keshab1997/smart_ocr_ai_bridge
 repository: https://github.com/Keshab1997/smart_ocr_ai_bridge
 issue_tracker: https://github.com/Keshab1997/smart_ocr_ai_bridge/issues

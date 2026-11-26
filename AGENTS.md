@@ -366,5 +366,7 @@ down here is never touched).
   `flutter test test/smart_ocr_ai_bridge_test.dart`. No CI workflow is
   configured in this repo, so the local run is the only gate — keep it green
   before pushing.
-- **Watch out:** `build/` is committed to git here (it should be gitignored);
-  do not assume it reflects the current source.
+- **Web compatibility:** `MultilingualOcrExtractor` conditionally imports its
+  `dart:io` ML Kit implementation (`multilingual_ocr_extractor_io.dart`) or web
+  fallback (`multilingual_ocr_extractor_stub.dart`), so consumers that build for
+  Flutter Web compile cleanly and automatically route through vision fallback.
