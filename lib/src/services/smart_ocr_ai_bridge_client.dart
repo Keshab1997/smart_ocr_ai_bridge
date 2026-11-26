@@ -353,9 +353,13 @@ class SmartOcrAiBridge {
               );
 
         if (response.statusCode >= 200 && response.statusCode < 300) {
+          final decodedBody = utf8.decode(
+            response.bodyBytes,
+            allowMalformed: true,
+          );
           final parsedAnswer = key.isGoogleGemini
-              ? _extractGeminiText(response.body)
-              : _extractOpenAiText(response.body);
+              ? _extractGeminiText(decodedBody)
+              : _extractOpenAiText(decodedBody);
 
           pool.reportSuccess(key);
 
