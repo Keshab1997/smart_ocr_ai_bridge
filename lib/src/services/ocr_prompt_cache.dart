@@ -12,6 +12,9 @@ class OcrPromptCache {
   int get length => _store.length;
 
   /// Builds a deterministic cache key from the prompt and compacted OCR text.
+  ///
+  /// Uses 32-bit FNV-1a masks (`<= 0xffffffff`) so the integer literals are
+  /// 100% compatible with both 64-bit native Dart VM and `dart2js` / Flutter Web.
   static String computeKey({
     required String systemPrompt,
     required String userPrompt,
@@ -19,14 +22,16 @@ class OcrPromptCache {
     required String routingMode,
   }) {
     final payload = '$routingMode|$systemPrompt|$userPrompt|$compactedOcrText';
-    // 64-bit FNV-1a hash encoded as hex + length suffix for collision safety
-    var hash = 0xcbf29ce484222325;
+    var h1 = 0x811c9dc5;
+    var h2 = 0x01000193;
     final bytes = utf8.encode(payload);
     for (final b in bytes) {
-      hash ^= b;
-      hash = (hash * 0x100000001b3) & 0x7fffffffffffffff;
+      h1 ^= b;
+      h1 = (h1 * 0x01000193) & 0xffffffff;
+      h2 ^= (b + 0x9e) & 0xff;
+      h2 = (h2 * 0x01000193) & 0xffffffff;
     }
-    return '${hash.toRadixString(16)}_${bytes.length}';
+    return '${h1.toRadixString(16)}${h2.toRadixString(16)}_${bytes.length}';
   }
 
   String? get(String key) {
