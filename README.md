@@ -44,6 +44,57 @@ flutter pub get
 
 ---
 
+## Android setup — required, or 4 of the 5 scripts silently do nothing
+
+`google_mlkit_text_recognition` declares the four non-Latin script artifacts as
+**`compileOnly`**. They reach the compile classpath but are **never packaged
+into your APK** — the host app has to bring them in itself. A package cannot do
+this on your behalf, so every app that depends on `smart_ocr_ai_bridge` needs
+these four lines in its **own** `android/app/build.gradle(.kts)`:
+
+```kotlin
+dependencies {
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
+    implementation("com.google.mlkit:text-recognition-devanagari:16.0.1")
+    implementation("com.google.mlkit:text-recognition-japanese:16.0.1")
+    implementation("com.google.mlkit:text-recognition-korean:16.0.1")
+}
+```
+
+(Groovy `build.gradle` is the same, with `implementation "…"` instead.)
+
+Without them only `latin` exists in the build, and the failure is quiet rather
+than loud, because `MultilingualOcrExtractor` wraps each script pass in its own
+`try/catch`: the Chinese recogniser throws
+`NoClassDefFoundError: ...vision.text.chinese.ChineseTextRecognizerOptions$Builder`
+the moment it runs, the catch swallows it, and `extractFromInputImage` returns
+a perfectly valid result scored from **latin text only**. Bengali, Hindi,
+Chinese, Japanese and Korean scans then look like "no text detected".
+
+Symptom to look for in `adb logcat`:
+
+```
+NoClassDefFoundError: Failed resolution of:
+  Lcom/google/mlkit/vision/text/chinese/ChineseTextRecognizerOptions$Builder;
+```
+
+These are the **bundled-model** artifacts: the models ship inside the APK and
+work offline, but they add roughly 2 MB per script. If APK size matters more
+than offline first-run, swap them for the Play-Services variants
+(`com.google.android.gms:play-services-mlkit-text-recognition-*`), which
+download models on demand.
+
+**Verify the build actually has them** instead of trusting the Gradle file — a
+rename can still happen later, and a name-only check is what misses this bug:
+
+```bash
+# one entry per script should be listed
+unzip -l build/app/outputs/flutter-apk/app-release.apk \
+  | grep mlkit-google-ocr-models | grep -c gocr
+```
+
+---
+
 ## Quick Start
 
 ### 1. Bind `ApiKeyManager.instance` once at startup (e.g. in `main.dart`)
