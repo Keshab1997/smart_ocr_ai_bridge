@@ -330,56 +330,41 @@ Everything above the end marker is maintained by
 `scripts/install-agent-pack.sh` (re-run the one-liner to update it; your text
 down here is never touched).
 
-- **App:** Khoroch Diary — offline-first personal finance ledger. Local SQLite
-  (Drift) is the source of truth (web: Drift WASM + IndexedDB via
-  `openWebLedger`); Supabase is an opt-in cloud backup (Google sign-in only,
-  RLS), never a dependency of the UI.
-- **App directory:** `.` — Flutter app at the repo root, shipped at v1 with
-  Flutter 3.50.0 / Dart 3.14.0 (`android/`, `ios/`, `web/`).
-- **Spec:** there is no spec contract in this repository. `docs/` was deleted
-  (2026-11-21) after Keshab's cleanup — `docs/spec/` (architecture/data-model/
-  screens/theme/open decisions), `docs/design/` (UI preview + style guide),
-  `docs/agent-briefs/` (past briefs) and the root README.md are all gone.
-  Product truth lives in the code (`lib/`) and in `test/`.
-- **Extra project rules:** money is integer **paise** (INR, Indian grouping),
-  never `double`; IDs are client UUIDs; deletes are tombstones; all colours
-  come from `AppColors` (`lib/core/theme/app_colors.dart`), never literal hex
-  in a feature widget; English + বাংলা via the in-code `AppString` enum
-  (`lib/core/l10n/app_strings.dart`), not `arb` files. Runtime dependencies:
-  drift, drift_flutter, supabase_flutter, shared_preferences, image_picker,
-  uuid — add more with `flutter pub add` only when a feature needs them
-  (`http` is dev-only: MockClient in test/supabase_cloud_backend_test.dart).
-- **Extra verification:** the seeded Home screen shows ₹10,000 income, ₹3,580
-  expense and ₹6,420 remaining (test/home_design_test.dart expects them);
-  `250 × 4 = 1,000` and `₹500 × 10 = ₹5,000` are the calculator/counter smoke
-  cases. 48 Dart test files cover the app (`flutter test` after `flutter
-  pub get`), including `test/local_ledger_migration_test.dart` which upgrades
-  real v1/v2 database files through `onUpgrade`;
-  `tests/test_ledger_schema.py` keeps the ledger DDL honest (65
-  tests, offline, `python3 -m pytest tests/ -q`). Check a UI change with
-  `python3 tool/local_screenshots.py --shot <name>` before asking Keshab to
-  look at it.
-- **Workflows (`.github/workflows/`):** six files; the flutter-builder gates
-  are pinned at `Keshab1997/flutter-builder@v1.18.9`. Automatic PR gate:
-  *PR quick checks — pytest & analyze* (`pr-checks.yml`) runs on
-  `pull_request` (path-filtered) with `pytest tests/` + `flutter analyze`
-  only — no `flutter test`, no builds. Approved manual gates: *Flutter CI —
-  Format, Analyze & Test* (`ci.yml`) and *Flutter widget-test diagnostics*
-  (`widget-tests.yml`). NOT approved, do not run without Keshab: *Web preview*
-  (`web-preview.yml` — push-triggered, visibility is a yes-no for Pages setup),
-  *Manual build* (`manual-build.yml`) and *Publish release*
-  (`publish-release.yml` — tags/releases). Quote the real names, never a
-  generic "Flutter CI".
-- **Android signing:** upload key at `android/app/upload-keystore.jks` (alias
-  `khatabook`, self-signed CN=Keshab Sarkar / O=Keshab Studios, valid to 2054)
-  and `key.properties` at the repo root — both gitignored, never commit. CI
-  receives the same key via secrets `ANDROID_KEYSTORE_BASE64`,
-  `KEYSTORE_PASSWORD`, `KEY_PASSWORD`, `KEY_ALIAS`; release signing in
-  `android/app/build.gradle.kts` falls back to debug when no key.properties
-  exists locally.
-- **Not yet present (needs approval):** Pages setup (`web-preview.yml` is
-  committed but unused), repository secrets beyond the four signing secrets,
-  tags/releases, and any publishing workflow run. Supabase is already
-  configured — URL and **publishable** key in `lib/core/config/cloud_project.dart`
-  (never a service-role key — `test/cloud_project_test.dart` proves it), RLS
-  migrations applied — there is nothing to approve there anymore.
+- **What this is:** `smart_ocr_ai_bridge` — a **Flutter package**, not an app.
+  It has no `android/`, `ios/`, `web/` and no `main.dart`, so there is nothing
+  here to `flutter run`, build or install. Consumers depend on it and get the
+  Android wiring themselves (see below).
+- **Public surface:** everything exported from `lib/smart_ocr_ai_bridge.dart` —
+  `SmartOcrAiBridge` (+ `.instance`), `MultilingualOcrExtractor`,
+  `OcrRoutingMode`, `SmartOcrAiResult`, `OcrPromptCache`,
+  `SmartEntityExtractor`, `OcrTextOptimizer`, `KeyPoolAdapter`/`BridgeKey`.
+  Changing an exported signature is a breaking change for every consumer;
+  bump the version with it.
+- **Pipeline:** five ML Kit scripts run concurrently on-device; the highest
+  `calculateOcrScore` result wins. `OcrRoutingMode` then decides what reaches
+  the LLM: `textOnly` (~85–95% token saving), `hybridAuto` (text when the
+  score clears `minOcrScoreForTextOnly`, vision otherwise), `structuredBlocks`
+  (`[Block N]` spatial markers) or `visionOnly`.
+- **Key rotation:** the `KeyPoolAdapter` is an interface. The package does
+  **not** depend on `admin_api_key_manager` — consumers bind it themselves via
+  `SmartOcrAiBridge.instance.bindApiKeyManager(...)`, which keeps Firestore out
+  of this package's dependency tree.
+- **Runtime dependencies — keep this list short:** only
+  `google_mlkit_text_recognition` 0.15.0, `http`, `path_provider`. Anything else
+  is a cost every consumer pays, so a new dependency needs to earn it.
+- **The trap every consumer hits (documented in README "Android setup"):**
+  `google_mlkit_text_recognition` declares four of the five scripts as
+  `compileOnly`, so they never reach a consumer's APK. A package cannot wire
+  them; each app must add the `implementation("com.google.mlkit:text-recognition-*")`
+  lines itself. And because `MultilingualOcrExtractor` wraps each script pass in
+  its own `try/catch`, a missing artifact is **silent** — only `latin`
+  contributes and the other scripts read as "no text". If someone reports
+  missing Bengali/Hindi/Chinese/Japanese/Korean, suspect their Gradle file
+  before this code.
+- **Tests:** one file, `test/smart_ocr_ai_bridge_test.dart` (5 tests; injected
+  `ScriptPassRunner` + `http` doubles, so fully offline). Run
+  `flutter test test/smart_ocr_ai_bridge_test.dart`. No CI workflow is
+  configured in this repo, so the local run is the only gate — keep it green
+  before pushing.
+- **Watch out:** `build/` is committed to git here (it should be gitignored);
+  do not assume it reflects the current source.
